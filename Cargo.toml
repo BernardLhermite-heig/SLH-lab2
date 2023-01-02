@@ -6,6 +6,13 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+argon2 = "0.4.1"
+rand_core = { version = "0.6", features = ["std"] }
+log = "0.4"
+env_logger = "0.10"
+
+lazy_static = "1.4"
+
 axum = { version = "0.6" }
 axum-extra = { version = "0.4", features = ["cookie"] }
 axum-sessions = "0.4"

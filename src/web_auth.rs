@@ -1,8 +1,14 @@
-use crate::db::DbConn;
+use argon2::{
+    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    Argon2,
+};
+use log::{error, info, warn};
+
+use crate::db::{get_user, save_user, user_exists, DbConn};
 use crate::models::{
     AppState, LoginRequest, OAuthRedirect, PasswordUpdateRequest, RegisterRequest,
 };
-use crate::user::UserDTO;
+use crate::user::{AuthenticationMethod, User, UserDTO};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
@@ -10,9 +16,14 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::cookie::Cookie;
 use axum_extra::extract::CookieJar;
-use axum_sessions::async_session::MemoryStore;
+use axum_sessions::{async_session::MemoryStore, async_session::Session};
+use lazy_static::lazy_static;
 use serde_json::json;
-use std::error::Error;
+use std::{borrow::Borrow, error::Error};
+
+lazy_static! {
+    static ref DEFAULT_PASSWORD: String = "Mr6XpGiKR8aMfr".to_string();
+}
 
 /// Declares the different endpoints
 /// state is used to pass common structs to the endpoints
@@ -31,40 +42,111 @@ pub fn stage(state: AppState) -> Router {
 /// POST /login
 /// BODY { "login_email": "email", "login_password": "password" }
 async fn login(
-    _conn: DbConn,
+    mut _conn: DbConn,
     jar: CookieJar,
     Json(login): Json<LoginRequest>,
 ) -> Result<(CookieJar, AuthResult), Response> {
     // TODO: Implement the login function. You can use the functions inside db.rs to check if
     //       the user exists and get the user info.
-    let _email = login.login_email;
+    let _email = login.login_email.to_lowercase();
     let _password = login.login_password;
+    let argon2 = Argon2::default();
+    let default_salt = SaltString::generate(&mut OsRng);
+
+    let user_dto = match get_user(&mut _conn, _email.as_str()) {
+        Ok(user) => {
+            let parsed_hash = PasswordHash::new(&user.password).unwrap();
+            if argon2
+                .verify_password(_password.as_bytes(), &parsed_hash)
+                .is_ok()
+            {
+                if user.email_verified == false {
+                    info!("Failed to login user: {}, email not verified", _email);
+                    return Ok((jar, AuthResult::UnverifiedEmail));
+                }
+
+                user.to_dto()
+            } else {
+                info!("Failed to login user: {}, wrong password", _email);
+                return Ok((jar, AuthResult::AuthFailed));
+            }
+        }
+        Err(_) => {
+            let parsed_hash = argon2
+                .hash_password(DEFAULT_PASSWORD.as_bytes(), &default_salt)
+                .unwrap();
+            _ = argon2.verify_password(_password.as_bytes(), &parsed_hash);
+            info!("Failed to login user: {}, not found", _email);
+            return Ok((jar, AuthResult::AuthFailed));
+        }
+    };
+
+    info!("User logged in: {}", _email);
+
+    let jar = add_auth_cookie(jar, &user_dto)
+        .or(Err(StatusCode::INTERNAL_SERVER_ERROR.into_response()))?;
 
     // Once the user has been created, authenticate the user by adding a JWT cookie in the cookie jar
     // let jar = add_auth_cookie(jar, &user_dto)
     //     .or(Err(StatusCode::INTERNAL_SERVER_ERROR.into_response()))?;
-    return Ok((jar, AuthResult::Success));
+    Ok((jar, AuthResult::Success))
 }
 
 /// Endpoint used to register a new account
 /// POST /register
 /// BODY { "register_email": "email", "register_password": "password", "register_password2": "password" }
 async fn register(
-    _conn: DbConn,
+    mut conn: DbConn,
     State(_session_store): State<MemoryStore>,
     Json(register): Json<RegisterRequest>,
 ) -> Result<AuthResult, Response> {
     // TODO: Implement the register function. The email must be verified by sending a link.
     //       You can use the functions inside db.rs to add a new user to the DB.
-    let _email = register.register_email;
-    let _password = register.register_password;
+    if register.register_password != register.register_password2 {
+        info!(
+            "Failed to register user: {}, passwords don't match",
+            register.register_email
+        );
+        return Ok(AuthResult::AuthFailed);
+    }
 
+    let email = register.register_email.to_lowercase();
+    let password = register.register_password;
+    let argon2 = Argon2::default();
+    let salt = SaltString::generate(&mut OsRng);
+
+    match user_exists(&mut conn, email.as_str()) {
+        Err(_) => {
+            let password_hash = argon2
+                .hash_password(password.as_bytes(), &salt)
+                .unwrap()
+                .to_string();
+
+            let new_user = User::new(
+                email.as_str(),
+                password_hash.as_str(),
+                AuthenticationMethod::Password,
+                false,
+            );
+
+            if let Err(e) = save_user(&mut conn, new_user) {
+                error!("Failed to save user: {}", e);
+                return Ok(AuthResult::InternalError);
+            }
+        }
+        Ok(_) => {
+            _ = argon2.hash_password(DEFAULT_PASSWORD.as_bytes(), &salt);
+            info!("Failed to register user: {}, already exists", email);
+            return Ok(AuthResult::AuthFailed);
+        }
+    }
+
+    info!("User registered: {}", email);
+    Ok(AuthResult::Success)
     // Once the user has been created, send a verification link by email
     // If you need to store data between requests, you may use the session_store. You need to first
     // create a new Session and store the variables. Then, you add the session to the session_store
     // to get a session_id. You then store the session_id in a cookie.
-
-    Ok(AuthResult::Success)
 }
 
 // TODO: Create the endpoint for the email verification function.
@@ -140,6 +222,9 @@ fn add_auth_cookie(jar: CookieJar, _user: &UserDTO) -> Result<CookieJar, Box<dyn
 
 enum AuthResult {
     Success,
+    AuthFailed,
+    InternalError,
+    UnverifiedEmail,
 }
 
 /// Returns a status code and a JSON payload based on the value of the enum
@@ -147,6 +232,9 @@ impl IntoResponse for AuthResult {
     fn into_response(self) -> Response {
         let (status, message) = match self {
             Self::Success => (StatusCode::OK, "Success"),
+            Self::AuthFailed => (StatusCode::UNAUTHORIZED, "Authentication failed"),
+            Self::InternalError => (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"),
+            Self::UnverifiedEmail => (StatusCode::UNAUTHORIZED, "Email is not verified"),
         };
         (status, Json(json!({ "res": message }))).into_response()
     }

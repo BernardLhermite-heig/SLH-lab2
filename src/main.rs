@@ -19,6 +19,8 @@ mod user;
 mod web_auth;
 mod web_pages;
 
+use env_logger::Env;
+
 /// Executes the SQL instructions in the migrations folder. This creates the users table.
 fn run_migrations(pool: Pool) {
     const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
@@ -32,6 +34,12 @@ fn run_migrations(pool: Pool) {
 async fn main() {
     // Read variables in .env file
     dotenv().ok();
+
+    let env = Env::default()
+        .filter_or("MY_LOG_LEVEL", "info")
+        .write_style_or("MY_LOG_STYLE", "always");
+
+    env_logger::init_from_env(env);
 
     // Reads the postgres url from an the POSTGRES_URL env variable
     let url = env::var("POSTGRES_URL").expect("Could not get POSTGRES_URL from ENV");
