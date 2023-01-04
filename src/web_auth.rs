@@ -6,6 +6,7 @@ use log::{error, info};
 
 use crate::{
     auth,
+    db::update_password,
     models::{AppState, LoginRequest, OAuthRedirect, PasswordUpdateRequest, RegisterRequest},
 };
 use crate::{
@@ -257,12 +258,50 @@ async fn oauth_redirect(
 /// POST /password_update
 /// BODY { "old_password": "pass", "new_password": "pass" }
 async fn password_update(
-    _conn: DbConn,
+    mut _conn: DbConn,
+    State(smtp_config): State<SmtpConfig>,
     _user: UserDTO,
     Json(_update): Json<PasswordUpdateRequest>,
 ) -> Result<AuthResult, Response> {
-    // TODO: Implement the password update function.
-    Ok(AuthResult::Success)
+    if _update.old_password == _update.new_password {
+        return Ok(AuthResult::PasswordIdentical);
+    }
+
+    let argon2 = Argon2::default();
+
+    match get_user(&mut _conn, &_user.email) {
+        Ok(user) => {
+            let password_hash = PasswordHash::new(&user.password).unwrap();
+            if argon2
+                .verify_password(_update.old_password.as_bytes(), &password_hash)
+                .is_err()
+            {
+                return Ok(AuthResult::WrongPassword);
+            }
+        }
+        Err(_) => {
+            error!("Failed to get user for password update: {}", &_user.email);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
+        }
+    }
+
+    let salt = SaltString::generate(&mut OsRng);
+    let password_hash = argon2
+        .hash_password(_update.new_password.as_bytes(), &salt)
+        .unwrap()
+        .to_string();
+
+    match update_password(&mut _conn, &_user.email, &password_hash) {
+        Ok(_) => {
+            send_email(&smtp_config, &_user.email, "Password updated", "Your password was updated successfully.")
+                .and(Ok(AuthResult::Success))
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        },
+        Err(_) => {
+            error!("Failed to update password for user: {}", &_user.email);
+            Err(StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        }
+    }
 }
 
 /// Endpoint handling the logout logic
@@ -286,6 +325,8 @@ enum AuthResult {
     UnverifiedAccount,
     AccountAlreadyExists,
     PasswordMismatch,
+    PasswordIdentical,
+    WrongPassword,
 }
 
 /// Returns a status code and a JSON payload based on the value of the enum
@@ -300,6 +341,8 @@ impl IntoResponse for AuthResult {
                 "An account with this email already exists",
             ),
             Self::PasswordMismatch => (StatusCode::BAD_REQUEST, "Both passwords must be the same"),
+            Self::PasswordIdentical => (StatusCode::BAD_REQUEST, "Passwords must be different"),
+            Self::WrongPassword => (StatusCode::BAD_REQUEST, "Wrong password"),
         };
         (status, Json(json!({ "res": message }))).into_response()
     }

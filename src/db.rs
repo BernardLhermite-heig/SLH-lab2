@@ -66,10 +66,11 @@ pub fn user_exists(conn: &mut DbConn, email: &str) -> Result<(), Box<dyn Error>>
     get_user(conn, email).and(Ok(()))
 }
 
-
+/// Sets the email_verified field of a user to true.
 pub fn set_user_verified(conn: &mut DbConn, email: &str) -> Result<(), Box<dyn Error>> {
     diesel::update(users::table.filter(users::email.eq(email.to_string())))
         .set(users::email_verified.eq(true))
         .execute(&mut conn.0)
-        .and(Ok(())).map_err(|e| e.into())
+        .and(Ok(()))
+        .map_err(|e| e.into())
 }
