@@ -1,4 +1,5 @@
 use crate::db::Pool;
+use crate::mailer::SmtpConfig;
 use axum::extract::FromRef;
 use axum_sessions::async_session::MemoryStore;
 use handlebars::Handlebars;
@@ -9,6 +10,7 @@ pub struct AppState {
     pub pool: Pool,
     pub session_store: MemoryStore,
     pub hbs: Handlebars<'static>,
+    pub smtp_config: SmtpConfig,
 }
 
 /// Returns a Pool from an AppState reference
@@ -29,6 +31,13 @@ impl FromRef<AppState> for MemoryStore {
 impl FromRef<AppState> for Handlebars<'_> {
     fn from_ref(state: &AppState) -> Self {
         state.hbs.clone()
+    }
+}
+
+/// Returns a SmtpConfig instance from an AppState reference
+impl FromRef<AppState> for SmtpConfig {
+    fn from_ref(state: &AppState) -> Self {
+        state.smtp_config.clone()
     }
 }
 

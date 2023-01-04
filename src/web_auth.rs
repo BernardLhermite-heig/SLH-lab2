@@ -2,13 +2,20 @@ use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
 };
-use log::{error, info, warn};
+use log::{error, info};
 
-use crate::db::{get_user, save_user, user_exists, DbConn};
-use crate::models::{
-    AppState, LoginRequest, OAuthRedirect, PasswordUpdateRequest, RegisterRequest,
+use crate::{
+    auth,
+    models::{AppState, LoginRequest, OAuthRedirect, PasswordUpdateRequest, RegisterRequest},
 };
-use crate::user::{AuthenticationMethod, User, UserDTO};
+use crate::{
+    db::set_user_verified,
+    user::{AuthenticationMethod, User, UserDTO},
+};
+use crate::{
+    db::{get_user, save_user, user_exists, DbConn},
+    mailer::{send_email, SmtpConfig},
+};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
@@ -19,10 +26,17 @@ use axum_extra::extract::CookieJar;
 use axum_sessions::{async_session::MemoryStore, async_session::Session};
 use lazy_static::lazy_static;
 use serde_json::json;
-use std::{borrow::Borrow, error::Error};
+use std::{borrow::Borrow, collections::HashMap, env, error::Error};
 
 lazy_static! {
     static ref DEFAULT_PASSWORD: String = "Mr6XpGiKR8aMfr".to_string();
+    static ref APP_URL: String = {
+        let mut url = env::var("APP_URL").expect("APP_URL must be set");
+        if url.ends_with('/') {
+            url = url[0..url.len() - 1].to_string();
+        }
+        url
+    };
 }
 
 /// Declares the different endpoints
@@ -35,6 +49,7 @@ pub fn stage(state: AppState) -> Router {
         .route("/_oauth", get(oauth_redirect))
         .route("/password_update", post(password_update))
         .route("/logout", get(logout))
+        .route("/verify", get(verify_email))
         .with_state(state)
 }
 
@@ -60,9 +75,9 @@ async fn login(
                 .verify_password(_password.as_bytes(), &parsed_hash)
                 .is_ok()
             {
-                if user.email_verified == false {
+                if !user.email_verified {
                     info!("Failed to login user: {}, email not verified", _email);
-                    return Ok((jar, AuthResult::UnverifiedEmail));
+                    return Ok((jar, AuthResult::UnverifiedAccount));
                 }
 
                 user.to_dto()
@@ -83,12 +98,13 @@ async fn login(
 
     info!("User logged in: {}", _email);
 
-    let jar = add_auth_cookie(jar, &user_dto)
-        .or(Err(StatusCode::INTERNAL_SERVER_ERROR.into_response()))?;
-
     // Once the user has been created, authenticate the user by adding a JWT cookie in the cookie jar
     // let jar = add_auth_cookie(jar, &user_dto)
     //     .or(Err(StatusCode::INTERNAL_SERVER_ERROR.into_response()))?;
+
+    let jar = add_auth_cookie(jar, &user_dto)
+        .or(Err(StatusCode::INTERNAL_SERVER_ERROR.into_response()))?;
+
     Ok((jar, AuthResult::Success))
 }
 
@@ -98,6 +114,7 @@ async fn login(
 async fn register(
     mut conn: DbConn,
     State(_session_store): State<MemoryStore>,
+    State(smtp_config): State<SmtpConfig>,
     Json(register): Json<RegisterRequest>,
 ) -> Result<AuthResult, Response> {
     // TODO: Implement the register function. The email must be verified by sending a link.
@@ -107,7 +124,7 @@ async fn register(
             "Failed to register user: {}, passwords don't match",
             register.register_email
         );
-        return Ok(AuthResult::AuthFailed);
+        return Ok(AuthResult::PasswordMismatch);
     }
 
     let email = register.register_email.to_lowercase();
@@ -115,7 +132,7 @@ async fn register(
     let argon2 = Argon2::default();
     let salt = SaltString::generate(&mut OsRng);
 
-    match user_exists(&mut conn, email.as_str()) {
+    let user = match user_exists(&mut conn, email.as_str()) {
         Err(_) => {
             let password_hash = argon2
                 .hash_password(password.as_bytes(), &salt)
@@ -129,19 +146,37 @@ async fn register(
                 false,
             );
 
+            let user = new_user.to_dto();
+
             if let Err(e) = save_user(&mut conn, new_user) {
                 error!("Failed to save user: {}", e);
-                return Ok(AuthResult::InternalError);
+                return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
             }
+
+            user
         }
         Ok(_) => {
             _ = argon2.hash_password(DEFAULT_PASSWORD.as_bytes(), &salt);
             info!("Failed to register user: {}, already exists", email);
-            return Ok(AuthResult::AuthFailed);
+            return Ok(AuthResult::AccountAlreadyExists);
         }
-    }
+    };
 
     info!("User registered: {}", email);
+
+    let token = auth::sign(user).or(Err(StatusCode::INTERNAL_SERVER_ERROR.into_response()))?;
+
+    send_email(
+        &smtp_config,
+        email.as_str(),
+        "Account verification",
+        &format!(
+            "Please verify your account by clicking on the following <a href=\"{}/verify?token={}\">link</a>",
+            *APP_URL, token
+        ),
+    )
+    .or(Err(StatusCode::INTERNAL_SERVER_ERROR.into_response()))?;
+
     Ok(AuthResult::Success)
     // Once the user has been created, send a verification link by email
     // If you need to store data between requests, you may use the session_store. You need to first
@@ -150,6 +185,31 @@ async fn register(
 }
 
 // TODO: Create the endpoint for the email verification function.
+/// Endpoint used to verify an email address
+/// GET /verify_email?token={token}
+async fn verify_email(
+    mut conn: DbConn,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Redirect, StatusCode> {
+    let token = match params.get("token") {
+        Some(token) => token,
+        None => {
+            info!("Failed to verify email: no token provided");
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    };
+    let claims = match auth::verify(token) {
+        Ok(claims) => claims,
+        Err(_) => {
+            info!("Failed to verify email: invalid token");
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    };
+
+    set_user_verified(&mut conn, &claims.sub)
+        .and(Ok(Redirect::to("login")))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
 
 /// Endpoint used for the first OAuth step
 /// GET /oauth/google
@@ -216,15 +276,16 @@ async fn logout(jar: CookieJar) -> impl IntoResponse {
 fn add_auth_cookie(jar: CookieJar, _user: &UserDTO) -> Result<CookieJar, Box<dyn Error>> {
     // TODO: You have to create a new signed JWT and store it in the auth cookie.
     //       Careful with the cookie options.
-    let jwt = "JWT";
-    Ok(jar.add(Cookie::build("auth", jwt).finish()))
+    let token = auth::sign(_user.clone())?;
+    Ok(jar.add(Cookie::build("auth", token).secure(true).finish()))
 }
 
 enum AuthResult {
     Success,
     AuthFailed,
-    InternalError,
-    UnverifiedEmail,
+    UnverifiedAccount,
+    AccountAlreadyExists,
+    PasswordMismatch,
 }
 
 /// Returns a status code and a JSON payload based on the value of the enum
@@ -233,8 +294,12 @@ impl IntoResponse for AuthResult {
         let (status, message) = match self {
             Self::Success => (StatusCode::OK, "Success"),
             Self::AuthFailed => (StatusCode::UNAUTHORIZED, "Authentication failed"),
-            Self::InternalError => (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"),
-            Self::UnverifiedEmail => (StatusCode::UNAUTHORIZED, "Email is not verified"),
+            Self::UnverifiedAccount => (StatusCode::UNAUTHORIZED, "Email is not verified"),
+            Self::AccountAlreadyExists => (
+                StatusCode::CONFLICT,
+                "An account with this email already exists",
+            ),
+            Self::PasswordMismatch => (StatusCode::BAD_REQUEST, "Both passwords must be the same"),
         };
         (status, Json(json!({ "res": message }))).into_response()
     }

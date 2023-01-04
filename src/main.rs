@@ -1,4 +1,5 @@
 use crate::db::Pool;
+use crate::mailer::SmtpConfig;
 use crate::models::AppState;
 use axum::Router;
 use axum_sessions::async_session::MemoryStore;
@@ -12,6 +13,7 @@ use std::net::SocketAddr;
 
 mod auth;
 mod db;
+mod mailer;
 mod models;
 mod oauth;
 mod schema;
@@ -41,6 +43,13 @@ async fn main() {
 
     env_logger::init_from_env(env);
 
+    let smtp_config = SmtpConfig::new(
+        &env::var("SMPT_URL").expect("Could not get SMPT_URL from ENV"),
+        &env::var("SMTP_USERNAME").expect("Could not get SMTP_USERNAME from ENV"),
+        &env::var("SMTP_PASS").expect("Could not get SMTP_PASS from ENV"),
+        &env::var("SMTP_FROM").expect("Could not get SMTP_FROM from ENV"),
+    );
+
     // Reads the postgres url from an the POSTGRES_URL env variable
     let url = env::var("POSTGRES_URL").expect("Could not get POSTGRES_URL from ENV");
     let manager = ConnectionManager::<PgConnection>::new(url);
@@ -64,6 +73,7 @@ async fn main() {
         pool,
         session_store: MemoryStore::new(),
         hbs,
+        smtp_config,
     };
 
     // Setup the endpoints

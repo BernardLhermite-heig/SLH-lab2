@@ -8,8 +8,10 @@ edition = "2021"
 [dependencies]
 argon2 = "0.4.1"
 rand_core = { version = "0.6", features = ["std"] }
+lettre = "0.10"
 log = "0.4"
 env_logger = "0.10"
+jsonwebtoken = "8"
 
 lazy_static = "1.4"
 
