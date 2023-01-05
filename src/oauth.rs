@@ -3,14 +3,21 @@ use oauth2::{AuthUrl, ClientId, ClientSecret, RedirectUrl, TokenResponse, TokenU
 use once_cell::sync::Lazy;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
+use std::env;
+use lazy_static::lazy_static;
+
+lazy_static! {
+    static ref OAUTH_ID: String = env::var("OAUTH_ID").expect("OAUTH_ID must be set");
+    static ref OAUTH_SECRET: String = env::var("OAUTH_SECRET").expect("OAUTH_SECRET must be set");
+}
 
 #[allow(dead_code)]
 /// Lazy is used to initialize a complex static variable as it is currently not supported in native Rust.
 /// The initialization is done only once when the variable is used for the first time.  
 pub static OAUTH_CLIENT: Lazy<BasicClient> = Lazy::new(|| {
     // TODO: We currently hardcode the credentials, try to improve it.
-    let google_client_id = ClientId::new("GOOGLE_CLIENT_ID".to_string());
-    let google_client_secret = ClientSecret::new("GOOGLE_CLIENT_SECRET".to_string());
+    let google_client_id = ClientId::new(OAUTH_ID.to_string());
+    let google_client_secret = ClientSecret::new(OAUTH_SECRET.to_string());
 
     let auth_url = AuthUrl::new("https://accounts.google.com/o/oauth2/v2/auth".to_string())
         .expect("Invalid authorization endpoint URL");

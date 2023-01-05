@@ -74,7 +74,7 @@ where
             .extract::<CookieJar>()
             .await
             .expect("Could not get CookieJar from request parts");
-        let _jwt = jar.get("auth").ok_or(Redirect::to(REDIRECT_URL))?.value();
+        let _jwt = jar.get(crate::web_auth::COOKIE_AUTH.as_str()).ok_or(Redirect::to(REDIRECT_URL))?.value();
 
         verify(_jwt)
             .map(|c| UserDTO {

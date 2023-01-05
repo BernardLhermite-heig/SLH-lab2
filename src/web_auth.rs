@@ -1,21 +1,14 @@
+use crate::{
+    auth,
+    db::{self, DbConn},
+    mailer::{self, SmtpConfig},
+    models::{AppState, LoginRequest, OAuthRedirect, PasswordUpdateRequest, RegisterRequest},
+    oauth,
+    user::{AuthenticationMethod, User, UserDTO},
+};
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
-};
-use log::{error, info};
-
-use crate::{
-    auth,
-    db::update_password,
-    models::{AppState, LoginRequest, OAuthRedirect, PasswordUpdateRequest, RegisterRequest},
-};
-use crate::{
-    db::set_user_verified,
-    user::{AuthenticationMethod, User, UserDTO},
-};
-use crate::{
-    db::{get_user, save_user, user_exists, DbConn},
-    mailer::{send_email, SmtpConfig},
 };
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -24,12 +17,20 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::cookie::Cookie;
 use axum_extra::extract::CookieJar;
-use axum_sessions::{async_session::MemoryStore, async_session::Session};
+use axum_sessions::{
+    async_session::MemoryStore,
+    async_session::{Session, SessionStore},
+};
 use lazy_static::lazy_static;
+use oauth2::{reqwest::async_http_client, AuthorizationCode, CsrfToken, PkceCodeChallenge, Scope};
 use serde_json::json;
-use std::{borrow::Borrow, collections::HashMap, env, error::Error};
+use std::{collections::HashMap, env, error::Error};
 
 lazy_static! {
+    pub static ref COOKIE_AUTH: String = "auth".to_string();
+    static ref COOKIE_SESSION: String = "session".to_string();
+    static ref CSRF_KEY: String = "csrf_token".to_string();
+    static ref PKCE_KEY: String = "pkce_verifier".to_string();
     static ref DEFAULT_PASSWORD: String = "Mr6XpGiKR8aMfr".to_string();
     static ref APP_URL: String = {
         let mut url = env::var("APP_URL").expect("APP_URL must be set");
@@ -69,21 +70,29 @@ async fn login(
     let argon2 = Argon2::default();
     let default_salt = SaltString::generate(&mut OsRng);
 
-    let user_dto = match get_user(&mut _conn, _email.as_str()) {
+    let user_dto = match db::get_user(&mut _conn, _email.as_str()) {
         Ok(user) => {
             let parsed_hash = PasswordHash::new(&user.password).unwrap();
             if argon2
                 .verify_password(_password.as_bytes(), &parsed_hash)
                 .is_ok()
             {
+                if !matches!(user.get_auth_method(), AuthenticationMethod::Password) {
+                    log::info!(
+                        "Failed to login user: {}, wrong authentication method",
+                        _email
+                    );
+                    return Ok((jar, AuthResult::AuthFailed));
+                }
+
                 if !user.email_verified {
-                    info!("Failed to login user: {}, email not verified", _email);
+                    log::info!("Failed to login user: {}, email not verified", _email);
                     return Ok((jar, AuthResult::UnverifiedAccount));
                 }
 
                 user.to_dto()
             } else {
-                info!("Failed to login user: {}, wrong password", _email);
+                log::info!("Failed to login user: {}, wrong password", _email);
                 return Ok((jar, AuthResult::AuthFailed));
             }
         }
@@ -92,12 +101,12 @@ async fn login(
                 .hash_password(DEFAULT_PASSWORD.as_bytes(), &default_salt)
                 .unwrap();
             _ = argon2.verify_password(_password.as_bytes(), &parsed_hash);
-            info!("Failed to login user: {}, not found", _email);
+            log::info!("Failed to login user: {}, not found", _email);
             return Ok((jar, AuthResult::AuthFailed));
         }
     };
 
-    info!("User logged in: {}", _email);
+    log::info!("User logged in: {}", _email);
 
     // Once the user has been created, authenticate the user by adding a JWT cookie in the cookie jar
     // let jar = add_auth_cookie(jar, &user_dto)
@@ -121,7 +130,7 @@ async fn register(
     // TODO: Implement the register function. The email must be verified by sending a link.
     //       You can use the functions inside db.rs to add a new user to the DB.
     if register.register_password != register.register_password2 {
-        info!(
+        log::info!(
             "Failed to register user: {}, passwords don't match",
             register.register_email
         );
@@ -133,7 +142,7 @@ async fn register(
     let argon2 = Argon2::default();
     let salt = SaltString::generate(&mut OsRng);
 
-    let user = match user_exists(&mut conn, email.as_str()) {
+    let user = match db::user_exists(&mut conn, email.as_str()) {
         Err(_) => {
             let password_hash = argon2
                 .hash_password(password.as_bytes(), &salt)
@@ -149,8 +158,8 @@ async fn register(
 
             let user = new_user.to_dto();
 
-            if let Err(e) = save_user(&mut conn, new_user) {
-                error!("Failed to save user: {}", e);
+            if let Err(e) = db::save_user(&mut conn, new_user) {
+                log::error!("Failed to save user: {}", e);
                 return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
             }
 
@@ -158,16 +167,16 @@ async fn register(
         }
         Ok(_) => {
             _ = argon2.hash_password(DEFAULT_PASSWORD.as_bytes(), &salt);
-            info!("Failed to register user: {}, already exists", email);
+            log::info!("Failed to register user: {}, already exists", email);
             return Ok(AuthResult::AccountAlreadyExists);
         }
     };
 
-    info!("User registered: {}", email);
+    log::info!("User registered: {}", email);
 
     let token = auth::sign(user).or(Err(StatusCode::INTERNAL_SERVER_ERROR.into_response()))?;
 
-    send_email(
+    mailer::send_email(
         &smtp_config,
         email.as_str(),
         "Account verification",
@@ -195,19 +204,19 @@ async fn verify_email(
     let token = match params.get("token") {
         Some(token) => token,
         None => {
-            info!("Failed to verify email: no token provided");
+            log::info!("Failed to verify email: no token provided");
             return Err(StatusCode::BAD_REQUEST);
         }
     };
     let claims = match auth::verify(token) {
         Ok(claims) => claims,
         Err(_) => {
-            info!("Failed to verify email: invalid token");
+            log::info!("Failed to verify email: invalid token");
             return Err(StatusCode::BAD_REQUEST);
         }
     };
 
-    set_user_verified(&mut conn, &claims.sub)
+    db::set_user_verified(&mut conn, &claims.sub)
         .and(Ok(Redirect::to("login")))
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
@@ -224,12 +233,43 @@ async fn google_oauth(
     //       the user, use the following scope: https://www.googleapis.com/auth/userinfo.email
     //       Use Redirect::to(url) to redirect the user to Google's authentication form.
 
-    // let client = crate::oauth::OAUTH_CLIENT.todo();
+    let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
+
+    let (auth_url, csrf_token) = oauth::OAUTH_CLIENT
+        .authorize_url(CsrfToken::new_random)
+        .add_scope(Scope::new(
+            "https://www.googleapis.com/auth/userinfo.email".to_string(),
+        ))
+        .set_pkce_challenge(pkce_challenge)
+        .url();
+
+    let mut session = Session::new();
+    session
+        .insert(CSRF_KEY.as_str(), csrf_token.secret().to_string())
+        .or(Err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    session
+        .insert(PKCE_KEY.as_str(), pkce_verifier)
+        .or(Err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    let session_id = _session_store
+        .store_session(session)
+        .await
+        .map_err(|_| {
+            log::error!("Failed to store session");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .unwrap();
+
+    let jar = jar.add(
+        Cookie::build(COOKIE_SESSION.as_str(), session_id)
+            .path("/")
+            .max_age(time::Duration::days(1))
+            .finish(),
+    );
 
     // If you need to store data between requests, you may use the session_store. You need to first
     // create a new Session and store the variables. Then, you add the session to the session_store
     // to get a session_id. You then store the session_id in a cookie.
-    Ok((jar, Redirect::to("myurl")))
+    Ok((jar, Redirect::to(auth_url.as_str())))
 }
 
 /// Endpoint called after a successful OAuth login.
@@ -237,7 +277,7 @@ async fn google_oauth(
 async fn oauth_redirect(
     jar: CookieJar,
     State(_session_store): State<MemoryStore>,
-    _conn: DbConn,
+    mut _conn: DbConn,
     _params: Query<OAuthRedirect>,
 ) -> Result<(CookieJar, Redirect), StatusCode> {
     // TODO: The user should be redirected to this page automatically after a successful login.
@@ -248,9 +288,68 @@ async fn oauth_redirect(
 
     // If you need to recover data between requests, you may use the session_store to load a session
     // based on a session_id.
+    let session_id = jar
+        .get(COOKIE_SESSION.as_str())
+        .ok_or(StatusCode::BAD_REQUEST)?
+        .value()
+        .to_string();
+    log::info!("Session id: {}", session_id);
+    let session = _session_store
+        .load_session(session_id)
+        .await
+        .map_err(|_| {
+            log::error!("Failed to load session");
+            StatusCode::UNAUTHORIZED
+        })?
+        .unwrap();
+
+    let csrf_token: String = session
+        .get(CSRF_KEY.as_str())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+
+    if !csrf_token.eq(&_params.state) {
+        log::error!("Invalid CSRF token");
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    let pkce_verifier = session
+        .get(PKCE_KEY.as_str())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+
+    let token = oauth::OAUTH_CLIENT
+        .exchange_code(AuthorizationCode::new(_params.code.clone()))
+        // Set the PKCE code verifier.
+        .set_pkce_verifier(pkce_verifier)
+        .request_async(async_http_client)
+        .await
+        .map_err(|_| {
+            log::error!("Failed to get token");
+            StatusCode::UNAUTHORIZED
+        })?;
+
+    let email = oauth::get_google_oauth_email(&token).await?;
 
     // Once the OAuth user is authenticated, create the user in the DB and add a JWT cookie
     // let jar = add_auth_cookie(jar, &user_dto).or(Err(StatusCode::INTERNAL_SERVER_ERROR))?;
+    let user_dto = match db::get_user(&mut _conn, email.as_str()) {
+        Ok(user) => user.to_dto(),
+        Err(_) => {
+            let user = User::new(email.as_str(), "oauth", AuthenticationMethod::OAuth, true);
+            let user_dto = user.to_dto();
+
+            if let Err(e) = db::save_user(&mut _conn, user) {
+                log::error!("Failed to save user: {}", e);
+                return Err(StatusCode::INTERNAL_SERVER_ERROR)
+            }
+
+            user_dto
+        }
+    };
+
+    let jar = add_auth_cookie(jar, &user_dto)
+        .or(Err(StatusCode::INTERNAL_SERVER_ERROR))?
+        .remove(Cookie::build("name", "").path("/").finish());
+
     Ok((jar, Redirect::to("/home")))
 }
 
@@ -269,7 +368,7 @@ async fn password_update(
 
     let argon2 = Argon2::default();
 
-    match get_user(&mut _conn, &_user.email) {
+    match db::get_user(&mut _conn, &_user.email) {
         Ok(user) => {
             let password_hash = PasswordHash::new(&user.password).unwrap();
             if argon2
@@ -280,7 +379,7 @@ async fn password_update(
             }
         }
         Err(_) => {
-            error!("Failed to get user for password update: {}", &_user.email);
+            log::error!("Failed to get user for password update: {}", &_user.email);
             return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
         }
     }
@@ -291,14 +390,17 @@ async fn password_update(
         .unwrap()
         .to_string();
 
-    match update_password(&mut _conn, &_user.email, &password_hash) {
-        Ok(_) => {
-            send_email(&smtp_config, &_user.email, "Password updated", "Your password was updated successfully.")
-                .and(Ok(AuthResult::Success))
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
-        },
+    match db::update_password(&mut _conn, &_user.email, &password_hash) {
+        Ok(_) => mailer::send_email(
+            &smtp_config,
+            &_user.email,
+            "Password updated",
+            "Your password was updated successfully.",
+        )
+        .and(Ok(AuthResult::Success))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
         Err(_) => {
-            error!("Failed to update password for user: {}", &_user.email);
+            log::error!("Failed to update password for user: {}", &_user.email);
             Err(StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
     }
@@ -307,7 +409,7 @@ async fn password_update(
 /// Endpoint handling the logout logic
 /// GET /logout
 async fn logout(jar: CookieJar) -> impl IntoResponse {
-    let new_jar = jar.remove(Cookie::named("auth"));
+    let new_jar = jar.remove(Cookie::named(COOKIE_AUTH.as_str()));
     (new_jar, Redirect::to("/home"))
 }
 
@@ -316,7 +418,12 @@ fn add_auth_cookie(jar: CookieJar, _user: &UserDTO) -> Result<CookieJar, Box<dyn
     // TODO: You have to create a new signed JWT and store it in the auth cookie.
     //       Careful with the cookie options.
     let token = auth::sign(_user.clone())?;
-    Ok(jar.add(Cookie::build("auth", token).secure(true).finish()))
+    Ok(jar.add(
+        Cookie::build(COOKIE_AUTH.as_str(), token)
+            .secure(true)
+            .max_age(time::Duration::hours(1))
+            .finish(),
+    ))
 }
 
 enum AuthResult {
