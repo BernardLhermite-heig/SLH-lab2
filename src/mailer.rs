@@ -20,6 +20,7 @@ impl SmtpConfig {
     }
 }
 
+/// Sends an email to the given address
 pub fn send_email(
     config: &SmtpConfig,
     to: &str,

@@ -113,7 +113,7 @@ async fn login(
     //     .or(Err(StatusCode::INTERNAL_SERVER_ERROR.into_response()))?;
 
     let jar = add_auth_cookie(jar, &user_dto)
-        .or(Err(StatusCode::INTERNAL_SERVER_ERROR.into_response()))?;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
 
     Ok((jar, AuthResult::Success))
 }
@@ -174,7 +174,7 @@ async fn register(
 
     log::info!("User registered: {}", email);
 
-    let token = auth::sign(user).or(Err(StatusCode::INTERNAL_SERVER_ERROR.into_response()))?;
+    let token = auth::sign(user).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
 
     mailer::send_email(
         &smtp_config,
@@ -184,8 +184,7 @@ async fn register(
             "Please verify your account by clicking on the following <a href=\"{}/verify?token={}\">link</a>",
             *APP_URL, token
         ),
-    )
-    .or(Err(StatusCode::INTERNAL_SERVER_ERROR.into_response()))?;
+    ).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
 
     Ok(AuthResult::Success)
     // Once the user has been created, send a verification link by email
@@ -339,7 +338,7 @@ async fn oauth_redirect(
 
             if let Err(e) = db::save_user(&mut _conn, user) {
                 log::error!("Failed to save user: {}", e);
-                return Err(StatusCode::INTERNAL_SERVER_ERROR)
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
             }
 
             user_dto

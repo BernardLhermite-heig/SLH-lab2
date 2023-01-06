@@ -1,10 +1,10 @@
+use lazy_static::lazy_static;
 use oauth2::basic::{BasicClient, BasicTokenResponse};
 use oauth2::{AuthUrl, ClientId, ClientSecret, RedirectUrl, TokenResponse, TokenUrl};
 use once_cell::sync::Lazy;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::env;
-use lazy_static::lazy_static;
 
 lazy_static! {
     static ref OAUTH_ID: String = env::var("OAUTH_ID").expect("OAUTH_ID must be set");

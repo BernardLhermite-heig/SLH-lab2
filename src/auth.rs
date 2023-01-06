@@ -53,7 +53,8 @@ pub fn verify(token: &str) -> Result<Claims, Box<dyn Error>> {
         token,
         &DecodingKey::from_secret(JWT_SECRET.as_bytes()),
         &Validation::default(),
-    ).map(|data| data.claims)?)
+    )
+    .map(|data| data.claims)?)
 }
 
 const REDIRECT_URL: &str = "/home";
@@ -74,7 +75,10 @@ where
             .extract::<CookieJar>()
             .await
             .expect("Could not get CookieJar from request parts");
-        let _jwt = jar.get(crate::web_auth::COOKIE_AUTH.as_str()).ok_or(Redirect::to(REDIRECT_URL))?.value();
+        let _jwt = jar
+            .get(crate::web_auth::COOKIE_AUTH.as_str())
+            .ok_or_else(|| Redirect::to(REDIRECT_URL))?
+            .value();
 
         verify(_jwt)
             .map(|c| UserDTO {
