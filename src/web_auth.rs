@@ -1,5 +1,5 @@
 use crate::{
-    auth,
+    auth::{self, LoginClaims, VerificationClaims},
     db::{self, DbConn},
     mailer::{self, SmtpConfig},
     models::{AppState, LoginRequest, OAuthRedirect, PasswordUpdateRequest, RegisterRequest},
@@ -19,12 +19,13 @@ use axum_extra::extract::cookie::Cookie;
 use axum_extra::extract::CookieJar;
 use axum_sessions::{
     async_session::MemoryStore,
-    async_session::{Session, SessionStore},
+    async_session::{chrono::Duration, Session, SessionStore},
 };
 use lazy_static::lazy_static;
 use oauth2::{reqwest::async_http_client, AuthorizationCode, CsrfToken, PkceCodeChallenge, Scope};
 use serde_json::json;
 use std::{collections::HashMap, env, error::Error};
+use zxcvbn::zxcvbn;
 
 lazy_static! {
     pub static ref COOKIE_AUTH: String = "auth".to_string();
@@ -137,6 +138,14 @@ async fn register(
         return Ok(AuthResult::PasswordMismatch);
     }
 
+    if !check_password_strength(register.register_password.as_str()) {
+        log::info!(
+            "Failed to register user: {}, password too weak",
+            register.register_email
+        );
+        return Ok(AuthResult::PasswordTooWeak);
+    }
+
     let email = register.register_email.to_lowercase();
     let password = register.register_password;
     let argon2 = Argon2::default();
@@ -174,7 +183,8 @@ async fn register(
 
     log::info!("User registered: {}", email);
 
-    let token = auth::sign(user).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
+    let token = auth::sign(VerificationClaims::new(&user.email, Duration::hours(24)))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
 
     mailer::send_email(
         &smtp_config,
@@ -207,7 +217,7 @@ async fn verify_email(
             return Err(StatusCode::BAD_REQUEST);
         }
     };
-    let claims = match auth::verify(token) {
+    let claims = match auth::verify::<VerificationClaims>(token) {
         Ok(claims) => claims,
         Err(_) => {
             log::info!("Failed to verify email: invalid token");
@@ -261,6 +271,8 @@ async fn google_oauth(
     let jar = jar.add(
         Cookie::build(COOKIE_SESSION.as_str(), session_id)
             .path("/")
+            .secure(true)
+            .http_only(true)
             .max_age(time::Duration::days(1))
             .finish(),
     );
@@ -331,7 +343,7 @@ async fn oauth_redirect(
     // Once the OAuth user is authenticated, create the user in the DB and add a JWT cookie
     // let jar = add_auth_cookie(jar, &user_dto).or(Err(StatusCode::INTERNAL_SERVER_ERROR))?;
     let user_dto = match db::get_user(&mut _conn, email.as_str()) {
-        Ok(user) => user.to_dto(),
+        Ok(_) => return Err(StatusCode::UNAUTHORIZED),
         Err(_) => {
             let user = User::new(email.as_str(), "oauth", AuthenticationMethod::OAuth, true);
             let user_dto = user.to_dto();
@@ -347,7 +359,7 @@ async fn oauth_redirect(
 
     let jar = add_auth_cookie(jar, &user_dto)
         .or(Err(StatusCode::INTERNAL_SERVER_ERROR))?
-        .remove(Cookie::build("name", "").path("/").finish());
+        .remove(Cookie::build(COOKIE_SESSION, "").path("/").finish());
 
     Ok((jar, Redirect::to("/home")))
 }
@@ -361,8 +373,16 @@ async fn password_update(
     _user: UserDTO,
     Json(_update): Json<PasswordUpdateRequest>,
 ) -> Result<AuthResult, Response> {
+    if !matches!(_user.auth_method, AuthenticationMethod::Password) {
+        return Err(StatusCode::UNAUTHORIZED.into_response());
+    }
+
     if _update.old_password == _update.new_password {
         return Ok(AuthResult::PasswordIdentical);
+    }
+
+    if !check_password_strength(_update.new_password.as_str()) {
+        return Ok(AuthResult::PasswordTooWeak);
     }
 
     let argon2 = Argon2::default();
@@ -416,15 +436,23 @@ async fn logout(jar: CookieJar) -> impl IntoResponse {
 fn add_auth_cookie(jar: CookieJar, _user: &UserDTO) -> Result<CookieJar, Box<dyn Error>> {
     // TODO: You have to create a new signed JWT and store it in the auth cookie.
     //       Careful with the cookie options.
-    let token = auth::sign(_user.clone())?;
+    let token = auth::sign(LoginClaims::new(_user.clone(), Duration::hours(1)))?;
     Ok(jar.add(
         Cookie::build(COOKIE_AUTH.as_str(), token)
             .secure(true)
             .max_age(time::Duration::hours(1))
+            .http_only(true)
             .finish(),
     ))
 }
 
+/// Checks that the given password is strong enough
+fn check_password_strength(password: &str) -> bool {
+    let estimate = zxcvbn(password, &[]).unwrap();
+    return password.chars().count() >= 8
+        && password.chars().count() <= 64
+        && estimate.score() >= 3;
+}
 enum AuthResult {
     Success,
     AuthFailed,
@@ -432,6 +460,7 @@ enum AuthResult {
     AccountAlreadyExists,
     PasswordMismatch,
     PasswordIdentical,
+    PasswordTooWeak,
     WrongPassword,
 }
 
@@ -448,7 +477,8 @@ impl IntoResponse for AuthResult {
             ),
             Self::PasswordMismatch => (StatusCode::BAD_REQUEST, "Both passwords must be the same"),
             Self::PasswordIdentical => (StatusCode::BAD_REQUEST, "Passwords must be different"),
-            Self::WrongPassword => (StatusCode::BAD_REQUEST, "Wrong password"),
+            Self::PasswordTooWeak => (StatusCode::BAD_REQUEST, "Password is too weak"),
+            Self::WrongPassword => (StatusCode::UNAUTHORIZED, "Wrong password"),
         };
         (status, Json(json!({ "res": message }))).into_response()
     }

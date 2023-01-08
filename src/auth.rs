@@ -10,26 +10,33 @@ use axum_extra::extract::CookieJar;
 use axum_sessions::async_session::chrono::{Duration, Utc};
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation};
 use lazy_static::lazy_static;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::env;
-use std::error::Error;
+use std::{env, error::Error};
 
 lazy_static! {
     static ref JWT_SECRET: String = env::var("JWT_SECRET").expect("JWT_SECRET must be set");
 }
 
 #[derive(Deserialize, Serialize)]
-pub struct Claims {
+pub struct LoginClaims {
     pub sub: String,
     pub exp: i64,
     pub iat: i64,
     pub auth_method: AuthenticationMethod,
 }
 
-impl Claims {
-    pub fn new(user: UserDTO) -> Self {
+#[derive(Deserialize, Serialize)]
+pub struct VerificationClaims {
+    pub sub: String,
+    pub exp: i64,
+    pub iat: i64,
+}
+
+impl LoginClaims {
+    pub fn new(user: UserDTO, duration: Duration) -> Self {
         let iat = Utc::now();
-        let exp = iat + Duration::hours(24);
+        let exp = iat + duration;
 
         Self {
             sub: user.email,
@@ -40,15 +47,28 @@ impl Claims {
     }
 }
 
-pub fn sign(user: UserDTO) -> Result<String, Box<dyn Error>> {
+impl VerificationClaims {
+    pub fn new(email: &str, duration: Duration) -> Self {
+        let iat = Utc::now();
+        let exp = iat + duration;
+
+        Self {
+            sub: email.to_string(),
+            iat: iat.timestamp(),
+            exp: exp.timestamp(),
+        }
+    }
+}
+
+pub fn sign<T: Serialize>(claims: T) -> Result<String, Box<dyn Error>> {
     Ok(jsonwebtoken::encode(
         &Header::default(),
-        &Claims::new(user),
+        &claims,
         &EncodingKey::from_secret(JWT_SECRET.as_bytes()),
     )?)
 }
 
-pub fn verify(token: &str) -> Result<Claims, Box<dyn Error>> {
+pub fn verify<T: DeserializeOwned>(token: &str) -> Result<T, Box<dyn Error>> {
     Ok(jsonwebtoken::decode(
         token,
         &DecodingKey::from_secret(JWT_SECRET.as_bytes()),
@@ -80,7 +100,7 @@ where
             .ok_or_else(|| Redirect::to(REDIRECT_URL))?
             .value();
 
-        verify(_jwt)
+        verify::<LoginClaims>(_jwt)
             .map(|c| UserDTO {
                 email: c.sub,
                 auth_method: c.auth_method,

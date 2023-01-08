@@ -1,3 +1,4 @@
+use lettre::message::header;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{Message, SmtpTransport, Transport};
 use log::{error, info};
@@ -31,6 +32,7 @@ pub fn send_email(
         .from(format!("<{}>", config.from).parse().unwrap())
         .to(format!("<{}>", to).parse().unwrap())
         .subject(subject)
+        .header(header::ContentType::TEXT_HTML)
         .body(body.to_string())
         .unwrap();
 
