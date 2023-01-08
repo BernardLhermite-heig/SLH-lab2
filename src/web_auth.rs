@@ -359,7 +359,7 @@ async fn oauth_redirect(
 
     let jar = add_auth_cookie(jar, &user_dto)
         .or(Err(StatusCode::INTERNAL_SERVER_ERROR))?
-        .remove(Cookie::build(COOKIE_SESSION, "").path("/").finish());
+        .remove(Cookie::build(COOKIE_SESSION.as_str(), "").path("/").finish());
 
     Ok((jar, Redirect::to("/home")))
 }

@@ -101,7 +101,7 @@ where
             .value();
 
         verify::<LoginClaims>(_jwt)
-            .map(|c| UserDTO {
+            .map(|c| Self {
                 email: c.sub,
                 auth_method: c.auth_method,
             })
