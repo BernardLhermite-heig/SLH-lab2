@@ -14,6 +14,7 @@ env_logger = "0.10"
 jsonwebtoken = "8"
 time = "0.3"
 zxcvbn = "2.2"
+regex = "1.7"
 
 lazy_static = "1.4"
 

@@ -18,6 +18,7 @@ mod models;
 mod oauth;
 mod schema;
 mod user;
+mod validations;
 mod web_auth;
 mod web_pages;
 

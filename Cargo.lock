@@ -111,6 +111,7 @@ dependencies = [
  "oauth2",
  "once_cell",
  "rand_core",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

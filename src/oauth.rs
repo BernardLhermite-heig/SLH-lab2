@@ -11,7 +11,6 @@ lazy_static! {
     static ref OAUTH_SECRET: String = env::var("OAUTH_SECRET").expect("OAUTH_SECRET must be set");
 }
 
-#[allow(dead_code)]
 /// Lazy is used to initialize a complex static variable as it is currently not supported in native Rust.
 /// The initialization is done only once when the variable is used for the first time.  
 pub static OAUTH_CLIENT: Lazy<BasicClient> = Lazy::new(|| {
@@ -36,8 +35,7 @@ pub static OAUTH_CLIENT: Lazy<BasicClient> = Lazy::new(|| {
     )
 });
 
-#[allow(dead_code)]
-static REQW_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| reqwest::Client::new());
+static REQW_CLIENT: Lazy<reqwest::Client> = Lazy::new(reqwest::Client::new);
 
 /// Structure returned by Google API when requesting the email address
 #[derive(Serialize, Deserialize, Debug)]
@@ -48,7 +46,6 @@ struct UserInfoEmail {
     picture: String,
 }
 
-#[allow(dead_code)]
 /// Returns the email address associated with the token
 pub async fn get_google_oauth_email(token: &BasicTokenResponse) -> Result<String, StatusCode> {
     REQW_CLIENT
@@ -56,10 +53,6 @@ pub async fn get_google_oauth_email(token: &BasicTokenResponse) -> Result<String
         .query(&[("access_token", token.access_token().secret())])
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .send()
-        .await
-        .and_then(|r| Ok(r.json::<UserInfoEmail>()))
-        .or_else(|_| Err(StatusCode::UNAUTHORIZED))?
-        .await
-        .and_then(|user_info| Ok(user_info.email))
-        .or_else(|_| Err(StatusCode::UNAUTHORIZED))
+        .await.map(|r| r.json::<UserInfoEmail>()).map_err(|_| StatusCode::UNAUTHORIZED)?
+        .await.map(|user_info| user_info.email).map_err(|_| StatusCode::UNAUTHORIZED)
 }

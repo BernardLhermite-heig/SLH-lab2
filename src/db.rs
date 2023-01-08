@@ -23,30 +23,25 @@ where
 
     async fn from_request_parts(_parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let pool = Pool::from_ref(state);
-        pool.get().and_then(|c| Ok(DbConn(c))).or(Err(()))
+        pool.get().map(DbConn).or(Err(()))
     }
 }
 
-#[allow(dead_code)]
 /// Get the user with the corresponding email from the DB.
 pub fn get_user(conn: &mut DbConn, email: &str) -> Result<User, Box<dyn Error>> {
     users::table
         .filter(users::email.eq(email.to_string()))
-        .first(&mut conn.0)
-        .or_else(|e| Err(e.into()))
+        .first(&mut conn.0).map_err(|e| e.into())
 }
 
-#[allow(dead_code)]
 /// Save a user inside the DB
 pub fn save_user(conn: &mut DbConn, user: User) -> Result<(), Box<dyn Error>> {
     diesel::insert_into(users::table)
         .values(user)
         .execute(&mut conn.0)
-        .and(Ok(()))
-        .or_else(|e| Err(e.into()))
+        .and(Ok(())).map_err(|e| e.into())
 }
 
-#[allow(dead_code)]
 /// Update the password of a user in the DB
 pub fn update_password(
     conn: &mut DbConn,
@@ -56,11 +51,9 @@ pub fn update_password(
     diesel::update(users::table.filter(users::email.eq(email.to_string())))
         .set(users::password.eq(password.to_string()))
         .execute(&mut conn.0)
-        .and(Ok(()))
-        .or_else(|e| Err(e.into()))
+        .and(Ok(())).map_err(|e| e.into())
 }
 
-#[allow(dead_code)]
 /// Checks whether a user with that email exists in the DB. Returns Ok(()) if the user exists.
 pub fn user_exists(conn: &mut DbConn, email: &str) -> Result<(), Box<dyn Error>> {
     get_user(conn, email).and(Ok(()))
