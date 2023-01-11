@@ -182,8 +182,6 @@ async fn verify_email(
         None => return Err(StatusCode::BAD_REQUEST),
     };
 
-    // En production il faudrait mettre en place un système permettant de renvoyer un email de confirmation
-    // de compte si le token a expiré.
     let claims = match jwt::verify::<VerificationClaims>(token) {
         Ok(claims) => claims,
         Err(_) => {
