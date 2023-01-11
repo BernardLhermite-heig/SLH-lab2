@@ -290,7 +290,10 @@ async fn oauth_redirect(
     let user_dto = match db::get_user(&mut _conn, email.as_str()) {
         Ok(user) => {
             if !matches!(user.get_auth_method(), AuthenticationMethod::OAuth) {
-                log::info!("User {} is not an OAuth user", email);
+                log::info!(
+                    "User {} already has an account which does not use OAuth",
+                    email
+                );
                 return Err(StatusCode::UNAUTHORIZED);
             }
             user.to_dto()
