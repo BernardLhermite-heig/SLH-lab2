@@ -72,16 +72,17 @@ async fn login(
 
     let user_dto = match db::get_user(&mut _conn, _email.as_str()) {
         Ok(user) => {
-            if auth::compare_hash(user.password.as_str(), _password.as_str()).is_err() {
-                log::info!("Failed to login user: {}, wrong password", _email);
-                return Ok((jar, AuthResult::AuthFailed));
-            }
-
             if !matches!(user.get_auth_method(), AuthenticationMethod::Password) {
                 log::info!(
                     "Failed to login user: {}, wrong authentication method",
                     _email
                 );
+                _ = auth::compare_hash(DEFAULT_HASH.as_ref(), _password.as_str());
+                return Ok((jar, AuthResult::AuthFailed));
+            }
+
+            if auth::compare_hash(user.password.as_str(), _password.as_str()).is_err() {
+                log::info!("Failed to login user: {}, wrong password", _email);
                 return Ok((jar, AuthResult::AuthFailed));
             }
 
