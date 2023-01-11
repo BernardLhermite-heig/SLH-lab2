@@ -7,12 +7,14 @@ use diesel::r2d2::ConnectionManager;
 use diesel::PgConnection;
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use dotenv::dotenv;
+use env_logger::Env;
 use handlebars::Handlebars;
 use std::env;
 use std::net::SocketAddr;
 
 mod auth;
 mod db;
+mod jwt;
 mod mailer;
 mod models;
 mod oauth;
@@ -21,8 +23,6 @@ mod user;
 mod validations;
 mod web_auth;
 mod web_pages;
-
-use env_logger::Env;
 
 /// Executes the SQL instructions in the migrations folder. This creates the users table.
 fn run_migrations(pool: Pool) {

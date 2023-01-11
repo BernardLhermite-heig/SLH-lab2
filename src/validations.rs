@@ -12,7 +12,11 @@ pub fn email_regex_validator(email: &str) -> bool {
 
 /// Checks that the given password is strong enough
 pub fn check_password_strength(password: &str) -> bool {
-    let estimate = zxcvbn(password, &[]).unwrap();
+    let estimate = match zxcvbn(password, &[]) {
+        Ok(entropy) => entropy,
+        Err(_) => return false,
+    };
+
     return password.chars().count() >= 8
         && password.chars().count() <= 64
         && estimate.score() >= 3;

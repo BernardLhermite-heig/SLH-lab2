@@ -31,7 +31,8 @@ where
 pub fn get_user(conn: &mut DbConn, email: &str) -> Result<User, Box<dyn Error>> {
     users::table
         .filter(users::email.eq(email.to_string()))
-        .first(&mut conn.0).map_err(|e| e.into())
+        .first(&mut conn.0)
+        .map_err(|e| e.into())
 }
 
 /// Save a user inside the DB
@@ -39,7 +40,8 @@ pub fn save_user(conn: &mut DbConn, user: User) -> Result<(), Box<dyn Error>> {
     diesel::insert_into(users::table)
         .values(user)
         .execute(&mut conn.0)
-        .and(Ok(())).map_err(|e| e.into())
+        .and(Ok(()))
+        .map_err(|e| e.into())
 }
 
 /// Update the password of a user in the DB
@@ -51,7 +53,8 @@ pub fn update_password(
     diesel::update(users::table.filter(users::email.eq(email.to_string())))
         .set(users::password.eq(password.to_string()))
         .execute(&mut conn.0)
-        .and(Ok(())).map_err(|e| e.into())
+        .and(Ok(()))
+        .map_err(|e| e.into())
 }
 
 /// Checks whether a user with that email exists in the DB. Returns Ok(()) if the user exists.
